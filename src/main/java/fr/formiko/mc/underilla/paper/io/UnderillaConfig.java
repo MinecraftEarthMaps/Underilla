@@ -36,6 +36,7 @@ public class UnderillaConfig {
     private final EnumMap<SetStructureKeys, Set<Structure>> listStructureMap;
     private final EnumMap<SetEntityTypeKeys, Set<EntityType>> listEntityTypeMap;
     private MergeStrategy mergeStrategy;
+    private volatile long revision;
 
 
     public UnderillaConfig(FileConfiguration fileConfiguration) {
@@ -77,6 +78,7 @@ public class UnderillaConfig {
     }
 
     public MergeStrategy getMergeStrategy() { return mergeStrategy; }
+    public long getRevision() { return revision; }
     public Selector getSelector() {
         return new Selector(getInt(IntegerKeys.GENERATION_AREA_MIN_X), getInt(IntegerKeys.GENERATION_AREA_MIN_Y),
                 getInt(IntegerKeys.GENERATION_AREA_MIN_Z), getInt(IntegerKeys.GENERATION_AREA_MAX_X),
@@ -191,6 +193,7 @@ public class UnderillaConfig {
         if (getInt(IntegerKeys.ADAPTATIVE_MIN_HIDDEN_BLOCKS_MERGE_DEPTH) > getInt(IntegerKeys.MERGE_DEPTH)) {
             integerMap.put(IntegerKeys.ADAPTATIVE_MIN_HIDDEN_BLOCKS_MERGE_DEPTH, getInt(IntegerKeys.MERGE_DEPTH));
         }
+        revision++;
     }
 
     private int guessCoordinate(IntegerKeys key) {
@@ -435,6 +438,7 @@ public class UnderillaConfig {
     public enum BooleanKeys {
         // @formatter:off
         DEBUG("debug", false),
+        PRESERVE_SURFACE_AFTER_POPULATION("surfaceWorld.preserveAfterPopulation", false),
         SURFACE_WORLD_BIOME_USE_TOP_Y_VALUE_ONLY("surfaceWorld.useTopYBiomeOnly", true),
         TRANSFER_BLOCKS_FROM_CAVES_WORLD("transferBlocksFromCavesWorld", false),
         TRANSFER_BIOMES_FROM_CAVES_WORLD("transferBiomesFromCavesWorld", false),

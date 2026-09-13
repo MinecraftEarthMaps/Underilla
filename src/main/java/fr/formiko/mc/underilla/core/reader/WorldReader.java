@@ -1,28 +1,19 @@
 package fr.formiko.mc.underilla.core.reader;
 
 import com.jkantrell.mca.Chunk;
-import com.jkantrell.mca.MCAFile;
 import com.jkantrell.mca.MCAUtil;
 import fr.formiko.mc.underilla.core.api.Biome;
 import fr.formiko.mc.underilla.core.api.Block;
 import fr.formiko.mc.underilla.core.generation.MergeStrategy;
 import fr.formiko.mc.underilla.paper.Underilla;
 import fr.formiko.mc.underilla.paper.impl.BukkitBlock;
-import fr.formiko.mc.underilla.paper.io.Tools;
 import fr.formiko.mc.underilla.paper.io.UnderillaConfig.IntegerKeys;
 import fr.formiko.mc.underilla.paper.io.UnderillaConfig.SetBiomeStringKeys;
+import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import java.io.File;
-import java.util.Deque;
-import java.util.HashMap;
-import java.util.LinkedList;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Optional;
-import java.util.stream.Stream;
-import org.apache.commons.lang3.tuple.ImmutablePair;
-import org.apache.commons.lang3.tuple.ImmutableTriple;
-import org.apache.commons.lang3.tuple.Pair;
-import org.apache.commons.lang3.tuple.Triple;
 
 public abstract class WorldReader implements Reader {
 
@@ -32,10 +23,10 @@ public abstract class WorldReader implements Reader {
     // FIELDS
     private final File world_;
     private final File regions_;
-    private final RLUCache<MCAFile> regionCache_;
-    private final RLUCache<ChunkReader> chunkCache_;
+    private final RLUCache<Optional<ChunkReader>> chunkCache_;
     private final RLUCache<Integer> yLevelCache_;
     private final RLUCacheTriple<String> biomeCache_;
+    private final Object[] chunkLoadLocks = new Object[256];
 
     // CONSTRUCTORS
     protected WorldReader(String worldPath) throws NoSuchFieldException { this(new File(worldPath)); }
@@ -48,12 +39,14 @@ public abstract class WorldReader implements Reader {
             throw new NoSuchFieldException("World directory '" + worldDir.getPath() + "' does not exist.");
         }
         File regionDir = new File(worldDir, WorldReader.REGION_DIRECTORY);
+        if (!regionDir.isDirectory()) {
+            regionDir = new File(worldDir, "dimensions/minecraft/overworld/region");
+        }
         if (!(regionDir.exists() && regionDir.isDirectory())) {
             throw new NoSuchFieldException("World '" + worldDir.getName() + "' doesn't have a 'region' directory.");
         }
         this.world_ = worldDir;
         this.regions_ = regionDir;
-        this.regionCache_ = new RLUCache<>(cacheSize);
         // There is 32*32 chunks in a region. We probably don't need to cache all of them.
         int chunkCacheSize = cacheSize * 64;
         this.chunkCache_ = new RLUCache<>(chunkCacheSize);
@@ -61,6 +54,7 @@ public abstract class WorldReader implements Reader {
         this.yLevelCache_ = new RLUCache<>(chunkCacheSize * Underilla.CHUNK_SIZE * Underilla.CHUNK_SIZE);
         // Cache as many biomes as it can fit in all the loaded chunks.
         this.biomeCache_ = new RLUCacheTriple<>(chunkCacheSize * 4 * 4);
+        java.util.Arrays.setAll(chunkLoadLocks, i -> new Object());
     }
 
 
@@ -80,25 +74,24 @@ public abstract class WorldReader implements Reader {
         return this.readChunk(chunkX, chunkZ).flatMap(c -> c.biomeAt(Math.floorMod(x, 16), y, Math.floorMod(z, 16)));
     }
     public Optional<ChunkReader> readChunk(int x, int z) {
-        // This is the step were we read the chunk from the region file.
-        // by setting the x and z to 0, we are able to read only 1 chunk.
-        // x = 0;
-        // z = 0;
-        ChunkReader chunkReader = this.chunkCache_.get(x, z);
-        if (chunkReader != null) {
-            return Optional.of(chunkReader);
+        Optional<ChunkReader> cached = this.chunkCache_.get(x, z);
+        if (cached != null) {
+            return cached;
         }
-        MCAFile r = this.readRegion(x >> 5, z >> 5);
-        if (r == null) {
-            return Optional.empty();
+        synchronized (chunkLoadLocks[(31 * x + z) & (chunkLoadLocks.length - 1)]) {
+            cached = this.chunkCache_.get(x, z);
+            if (cached != null) {
+                return cached;
+            }
+            try {
+                Chunk chunk = RegionChunkReader.read(this.regions_, x, z);
+                cached = Optional.ofNullable(chunk).map(this::newChunkReader);
+                this.chunkCache_.put(x, z, cached);
+                return cached;
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("Failed to read reference chunk " + x + ", " + z + " in " + regions_, e);
+            }
         }
-        Chunk chunk = r.getChunk(Math.floorMod(x, 32), Math.floorMod(z, 32));
-        if (chunk == null) {
-            return Optional.empty();
-        }
-        chunkReader = this.newChunkReader(chunk);
-        this.chunkCache_.put(x, z, chunkReader);
-        return Optional.of(chunkReader);
     }
 
     public int getLowerBlockOfSurfaceWorldYLevel(int globalX, int globalZ) {
@@ -134,8 +127,11 @@ public abstract class WorldReader implements Reader {
 
 
         // While is AIR, LEAVES, non solid block, etc, go down.
-        int lbtr = maxHeightOfCaves + mergeDepth;
-        while (!blockAt(globalX, lbtr, globalZ).orElse(BukkitBlock.AIR).isSolidAndSurfaceBlock() && lbtr > minimalPossibleY) {
+        ChunkReader column = readChunk(globalX >> 4, globalZ >> 4).orElse(null);
+        int lbtr = column == null ? minimalPossibleY
+                : Math.max(minimalPossibleY, Math.min(maxHeightOfCaves + mergeDepth, column.airSectionsBottom() - 1));
+        while (lbtr > minimalPossibleY && !column.blockAt(Math.floorMod(globalX, 16), lbtr, Math.floorMod(globalZ, 16))
+                .orElse(BukkitBlock.AIR).isSolidAndSurfaceBlock()) {
             lbtr--;
         }
 
@@ -164,15 +160,17 @@ public abstract class WorldReader implements Reader {
 
     private boolean haveNonSolidNeighbour(int x, int y, int z) {
         // Is there blocks next to that block that are not solid (air, leaves, etc). If no block are found, return false.
-        return Stream.of(blockAt(x + 1, y, z), blockAt(x - 1, y, z), blockAt(x, y, z + 1), blockAt(x, y, z - 1)).filter(Optional::isPresent)
-                .map(Optional::get).filter(b -> !b.isSolid()).findAny().isPresent();
+        return blockAt(x + 1, y, z).map(b -> !b.isSolid()).orElse(false)
+                || blockAt(x - 1, y, z).map(b -> !b.isSolid()).orElse(false)
+                || blockAt(x, y, z + 1).map(b -> !b.isSolid()).orElse(false)
+                || blockAt(x, y, z - 1).map(b -> !b.isSolid()).orElse(false);
     }
 
     public String getBiomeName(int globalX, int globalY, int globalZ) {
         // make globalX and globalZ multiple of BIOME_AREA_SIZE ot avoid storing duplicate data.
-        globalX = globalX - globalX % Underilla.BIOME_AREA_SIZE;
-        globalY = globalY - globalY % Underilla.BIOME_AREA_SIZE;
-        globalZ = globalZ - globalZ % Underilla.BIOME_AREA_SIZE;
+        globalX = Math.floorDiv(globalX, Underilla.BIOME_AREA_SIZE) * Underilla.BIOME_AREA_SIZE;
+        globalY = Math.floorDiv(globalY, Underilla.BIOME_AREA_SIZE) * Underilla.BIOME_AREA_SIZE;
+        globalZ = Math.floorDiv(globalZ, Underilla.BIOME_AREA_SIZE) * Underilla.BIOME_AREA_SIZE;
 
         String cached = biomeCache_.get(globalX, globalY, globalZ);
         if (cached != null) {
@@ -193,73 +191,33 @@ public abstract class WorldReader implements Reader {
     protected abstract ChunkReader newChunkReader(Chunk chunk);
 
 
-    // PRIVATE UTIL
-    private MCAFile readRegion(int x, int z) {
-        MCAFile region = this.regionCache_.get(x, z);
-        if (region != null) {
-            return region;
-        }
-        File regionFile = new File(this.regions_, "r." + x + "." + z + ".mca");
-        if (!regionFile.exists()) {
-            return null;
-        }
-        try {
-            region = MCAUtil.read(regionFile);
-            this.regionCache_.put(x, z, region);
-            return region;
-        } catch (Exception e) {
-            Underilla.error(() -> "Failed to read region file '" + regionFile.getPath() + "'");
-            Underilla.error(() -> Tools.exceptionToString(e));
-            return null;
-        }
-    }
-
-
     // CLASSES
     public static class RLUCache<T> {
 
         // FIELDS
-        private final Map<Pair<Integer, Integer>, T> map_ = new HashMap<>();
-        private final Deque<Pair<Integer, Integer>> queue_ = new LinkedList<>();
+        private final Long2ObjectLinkedOpenHashMap<T> map_ = new Long2ObjectLinkedOpenHashMap<>();
         private final int capacity_;
 
 
         // CONSTRUCTOR
-        RLUCache(int capacity) { this.capacity_ = capacity; }
+        RLUCache(int capacity) { this.capacity_ = Math.max(1, capacity); }
 
 
         // UTIL
-        // We synchronized the methods to avoid concurrent access to the cache.
-        // Concurrent access cause queue_ and map_ to grow without never being reduced.
-        // We might win few ms by reducing the part of the code that is synchronized, but I don't think it's worth the potential bugs.
+        // Keep reads and FIFO eviction atomic across generation workers.
         T get(int x, int z) {
-            Pair<Integer, Integer> pair = ImmutablePair.of(x, z);
+            long key = ((long) x << 32) | (z & 0xffffffffL);
             synchronized (this) {
-                // Set the pair to the front of the queue to avoid it to be removed soon.
-                // T cached = this.map_.get(pair);
-                // if (cached == null) {
-                // return null;
-                // }
-                // this.queue_.remove(pair);
-                // this.queue_.addFirst(pair);
-                // return cached;
-                // Do not edit the queue to be faster.
-                return this.map_.get(pair);
+                return this.map_.get(key);
             }
         }
         void put(int x, int z, T file) {
-            Pair<Integer, Integer> pair = ImmutablePair.of(x, z);
+            long key = ((long) x << 32) | (z & 0xffffffffL);
             synchronized (this) {
-                if (map_.containsKey(pair)) {
-                    this.queue_.remove(pair);
-                } else if (this.queue_.size() >= this.capacity_) {
-                    try {
-                        Pair<Integer, Integer> temp = this.queue_.removeLast();
-                        this.map_.remove(temp);
-                    } catch (NoSuchElementException ignored) {}
+                this.map_.putAndMoveToLast(key, file);
+                if (this.map_.size() > this.capacity_) {
+                    this.map_.removeFirst();
                 }
-                this.map_.put(pair, file);
-                this.queue_.addFirst(pair);
             }
         }
     }
@@ -267,13 +225,12 @@ public abstract class WorldReader implements Reader {
     public static class RLUCacheTriple<T> {
 
         // FIELDS
-        private final Map<Triple<Integer, Integer, Integer>, T> map_ = new HashMap<>();
-        private final Deque<Triple<Integer, Integer, Integer>> queue_ = new LinkedList<>();
+        private final Map<BiomePosition, T> map_ = new LinkedHashMap<>();
         private final int capacity_;
 
 
         // CONSTRUCTOR
-        RLUCacheTriple(int capacity) { this.capacity_ = capacity; }
+        RLUCacheTriple(int capacity) { this.capacity_ = Math.max(1, capacity); }
 
 
         // UTIL
@@ -281,25 +238,29 @@ public abstract class WorldReader implements Reader {
         // Concurrent access cause queue_ and map_ to grow without never being reduced.
         // We might win few ms by reducing the part of the code that is synchronized, but I don't think it's worth the potential bugs.
         T get(int x, int y, int z) {
-            Triple<Integer, Integer, Integer> pair = ImmutableTriple.of(x, y, z);
+            BiomePosition pair = new BiomePosition(x, y, z);
             synchronized (this) {
                 return this.map_.get(pair);
             }
         }
         void put(int x, int y, int z, T file) {
-            Triple<Integer, Integer, Integer> pair = ImmutableTriple.of(x, y, z);
+            BiomePosition pair = new BiomePosition(x, y, z);
             synchronized (this) {
-                if (map_.containsKey(pair)) {
-                    this.queue_.remove(pair);
-                } else if (this.queue_.size() >= this.capacity_) {
-                    try {
-                        Triple<Integer, Integer, Integer> temp = this.queue_.removeLast();
-                        this.map_.remove(temp);
-                    } catch (NoSuchElementException ignored) {}
-                }
+                this.map_.remove(pair);
                 this.map_.put(pair, file);
-                this.queue_.addFirst(pair);
+                if (this.map_.size() > this.capacity_) {
+                    this.map_.remove(this.map_.keySet().iterator().next());
+                }
             }
+        }
+    }
+
+    private record BiomePosition(int x, int y, int z) {
+        @Override public int hashCode() {
+            int hash = x * 73428767 ^ y * 912931 ^ z * 19349663;
+            hash ^= hash >>> 16;
+            hash *= 0x7feb352d;
+            return hash ^ (hash >>> 15);
         }
     }
 

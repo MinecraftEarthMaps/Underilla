@@ -11,9 +11,9 @@ import fr.formiko.mc.underilla.core.vector.LocatedBlock;
 import fr.formiko.mc.underilla.paper.Underilla;
 import fr.formiko.mc.underilla.paper.impl.BukkitBlock;
 import fr.formiko.mc.underilla.paper.io.UnderillaConfig.BooleanKeys;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -33,7 +33,7 @@ public class Generator {
         // ABSOLUTE strategy is used in the surface y level function only.
         // NONE stategy is used in
         this.merger = new AbsoluteMerger(worldSurfaceReader);
-        times = new HashMap<>();
+        times = new ConcurrentHashMap<>();
     }
 
     // TODO fix issue with short grass making village houses 1 block higher
@@ -113,6 +113,6 @@ public class Generator {
     }
 
     public static void addTime(String name, long startTime) {
-        times.put(name, times.getOrDefault(name, 0l) + (System.currentTimeMillis() - startTime));
+        times.merge(name, System.currentTimeMillis() - startTime, Long::sum);
     }
 }

@@ -9,10 +9,14 @@ import fr.formiko.mc.underilla.core.reader.ChunkReader;
 import fr.formiko.mc.underilla.core.reader.TagInterpreter;
 import fr.formiko.mc.underilla.paper.Underilla;
 import fr.formiko.mc.underilla.paper.io.Tools;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Material;
 
 public class BukkitChunkReader extends ChunkReader {
+    // Region palettes are immutable. Never share mutable BlockData with callers.
+    private final Map<CompoundTag, Optional<Block>> paletteBlocks = new ConcurrentHashMap<>();
     // private Map<String, org.bukkit.block.Biome> customBiomes = new HashMap<>();
 
     // CONSTRUCTORS
@@ -22,6 +26,13 @@ public class BukkitChunkReader extends ChunkReader {
     // IMPLEMENTATION
     @Override
     public Optional<Block> blockFromTag(CompoundTag tag) {
+        if (tag == null) {
+            return Optional.empty();
+        }
+        return paletteBlocks.computeIfAbsent(tag, this::parseBlockTag).map(block -> ((BukkitBlock) block).copy());
+    }
+
+    private Optional<Block> parseBlockTag(CompoundTag tag) {
         Material m = Optional.ofNullable(tag).map(t -> t.getString("Name")).map(Material::matchMaterial).orElse(null);
         if (m == null) {
             return Optional.empty();

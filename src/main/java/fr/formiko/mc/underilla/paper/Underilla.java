@@ -3,7 +3,7 @@ package fr.formiko.mc.underilla.paper;
 import fr.formiko.mc.underilla.core.generation.Generator;
 import fr.formiko.mc.underilla.paper.cleaning.CleanBlocksTask;
 import fr.formiko.mc.underilla.paper.cleaning.CleanEntitiesTask;
-import fr.formiko.mc.underilla.paper.cleaning.FollowableProgressTask;
+import fr.formiko.mc.underilla.paper.generation.GenerationProgressListener;
 import fr.formiko.mc.underilla.paper.generation.GeneratorAccessor;
 import fr.formiko.mc.underilla.paper.generation.UnderillaChunkGenerator;
 import fr.formiko.mc.underilla.paper.impl.BukkitWorldReader;
@@ -14,6 +14,7 @@ import fr.formiko.mc.underilla.paper.io.UnderillaConfig.IntegerKeys;
 import fr.formiko.mc.underilla.paper.io.UnderillaConfig.StringKeys;
 import fr.formiko.mc.underilla.paper.listener.ChunkGeneratedListener;
 import fr.formiko.mc.underilla.paper.listener.StructureEventListener;
+import fr.formiko.mc.underilla.paper.listener.SurfaceRestoreListener;
 import fr.formiko.mc.underilla.paper.listener.WorldListener;
 import fr.formiko.mc.underilla.paper.preparing.ServerSetup;
 import fr.formiko.mc.underilla.paper.selector.Selector;
@@ -32,7 +33,6 @@ import org.bukkit.generator.ChunkGenerator;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.popcraft.chunky.Chunky;
 import org.popcraft.chunky.ChunkyProvider;
-import org.popcraft.chunky.api.event.task.GenerationProgressEvent;
 
 public final class Underilla extends JavaPlugin {
 
@@ -108,6 +108,9 @@ public final class Underilla extends JavaPlugin {
                 this.getServer().getPluginManager().registerEvents(structureEventListener, this);
             }
             this.getServer().getPluginManager().registerEvents(new WorldListener(), this);
+            if (worldSurfaceReader != null && getUnderillaConfig().getBoolean(BooleanKeys.PRESERVE_SURFACE_AFTER_POPULATION)) {
+                this.getServer().getPluginManager().registerEvents(new SurfaceRestoreListener(worldSurfaceReader), this);
+            }
 
             if (getUnderillaConfig().getBoolean(BooleanKeys.CLEAN_ENTITIES_ENABLED)) {
                 info("Cleaning listener for blocks and/or entities have been init.");
@@ -123,7 +126,7 @@ public final class Underilla extends JavaPlugin {
             if (Generator.times != null) {
                 long totalTime = Generator.times.entrySet().stream().mapToLong(Map.Entry::getValue).sum();
                 for (Map.Entry<String, Long> entry : Generator.times.entrySet()) {
-                    info(entry.getKey() + " took " + entry.getValue() + "ms (" + (entry.getValue() * 100 / totalTime) + "%)");
+                    info(entry.getKey() + " took " + entry.getValue() + "ms (" + (entry.getValue() * 100 / Math.max(1, totalTime)) + "%)");
                 }
             }
             Map<String, Long> biomesPlaced = UnderillaChunkGenerator.getBiomesPlaced();
@@ -259,37 +262,41 @@ public final class Underilla extends JavaPlugin {
         int centerZ = (minZ + maxZ) / 2;
         int radiusX = (maxX - minX) / 2;
         int radiusZ = (maxZ - minZ) / 2;
-        final long startTime = System.currentTimeMillis();
         // Set chunky silent
         chunky.getConfig().setSilent(true);
 
-        chunky.getApi().onGenerationProgress(new Consumer<GenerationProgressEvent>() {
-            long printTime = 0;
-            long printTimeEachXMs = Underilla.MS_PER_SECOND * getUnderillaConfig().getInt(IntegerKeys.PRINT_PROGRESS_EVERY_X_SECONDS);
-            @Override
-            public void accept(GenerationProgressEvent generationProgressEvent) {
-                if (printTime + printTimeEachXMs < System.currentTimeMillis()) {
-                    printTime = System.currentTimeMillis();
-                    FollowableProgressTask.printProgress(generationProgressEvent.chunks(), startTime,
-                            generationProgressEvent.progress() / 100, 1, 1, "Rate: " + (int) (generationProgressEvent.rate())
-                                    + ", Current: " + generationProgressEvent.x() + " " + generationProgressEvent.z());
-                }
-            }
-        });
-
-        chunky.getApi().onGenerationComplete(generationCompleteEvent -> {
-            info("Chunky task for world " + worldName + " has finished");
-            if (structureEventListener != null) {
-                info("Structure generation: " + structureEventListener.getStructureCount());
-            }
-            validateTask(StringKeys.STEP_UNDERILLA_GENERATION);
-        });
+        chunky.getApi().onGenerationProgress(new GenerationProgressListener(worldName,
+                MS_PER_SECOND * getUnderillaConfig().getInt(IntegerKeys.PRINT_PROGRESS_EVERY_X_SECONDS),
+                Underilla::info, () -> getServer().getScheduler().runTask(this, () -> {
+                    info("Chunky task for world " + worldName + " has finished");
+                    if (structureEventListener != null) {
+                        info("Structure generation: " + structureEventListener.getStructureCount());
+                    }
+                    validateTask(StringKeys.STEP_UNDERILLA_GENERATION);
+                })));
 
         boolean worked;
         if (restart) {
+            // A cursor belongs to its traversal order. Refuse a checkpoint if a
+            // dependency replacement would silently resume it using another order.
+            var savedWorld = chunky.getServer().getWorld(worldName);
+            var savedTask = savedWorld.flatMap(world -> chunky.getTaskLoader().loadTask(world));
+            if (savedTask.isPresent()
+                    && savedTask.get().getSelection().pattern().getType().equals("region-rectangle-v1")
+                    && !savedTask.get().getChunkIterator().name().equals("region-rectangle-v1")) {
+                warning("Cannot resume tile checkpoint without the matching Chunky traversal patch. Restore the patched Chunky jar.");
+                return;
+            }
             worked = chunky.getApi().continueTask(worldName);
         } else {
-            worked = chunky.getApi().startTask(worldName, "rectangle", centerX, centerZ, radiusX, radiusZ, "region");
+            String pattern = "region";
+            try {
+                Class.forName("org.popcraft.chunky.iterator.TiledRectangleChunkIterator", false, Chunky.class.getClassLoader());
+                pattern = "region-rectangle-v1";
+            } catch (ClassNotFoundException ignored) {
+                // Stock Chunky remains supported; it uses its existing rectangle traversal.
+            }
+            worked = chunky.getApi().startTask(worldName, "rectangle", centerX, centerZ, radiusX, radiusZ, pattern);
             setToDoingTask(StringKeys.STEP_UNDERILLA_GENERATION);
         }
         if (worked) {

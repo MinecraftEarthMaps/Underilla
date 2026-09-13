@@ -27,6 +27,12 @@ public class BukkitBlock implements Block {
     // GETTERS
     public BlockData getBlockData() { return this.blockData_; }
 
+    public BukkitBlock copy() {
+        BukkitBlock copy = new BukkitBlock(blockData_.clone());
+        copy.spawnedType = spawnedType;
+        return copy;
+    }
+
     public Optional<EntityType> getSpawnedType() { return this.spawnedType; }
     public void setSpawnedType(String spawnedType) {
         this.spawnedType = Optional.ofNullable(EntityType.valueOf(spawnedType.replace("minecraft:", "").toUpperCase()));

@@ -27,6 +27,7 @@ import org.bukkit.HeightMap;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Biome;
+import org.bukkit.generator.BiomeParameterPoint;
 import org.bukkit.generator.BiomeProvider;
 import org.bukkit.generator.BlockPopulator;
 import org.bukkit.generator.ChunkGenerator;
@@ -287,6 +288,14 @@ public class UnderillaChunkGenerator extends ChunkGenerator {
                 return outOfTheSurfaceWorldBiomeProdiver.getBiome(worldInfo, x, y, z);
             }
             return customBiomeSource.getBiome(worldInfo, x, y, z);
+        }
+
+        @Override
+        public @Nonnull Biome getBiome(@NotNull WorldInfo worldInfo, int x, int y, int z, @NotNull BiomeParameterPoint point) {
+            if (outOfTheSurfaceWorldBiomeProdiver != null && isOutsideOfTheSurfaceWorld(x, z)) {
+                return outOfTheSurfaceWorldBiomeProdiver.getBiome(worldInfo, x, y, z, point);
+            }
+            return customBiomeSource.getBiome(worldInfo, x, y, z, point);
         }
 
         @Override

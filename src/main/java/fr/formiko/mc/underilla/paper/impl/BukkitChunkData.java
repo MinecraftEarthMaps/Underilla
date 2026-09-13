@@ -2,11 +2,17 @@ package fr.formiko.mc.underilla.paper.impl;
 
 import fr.formiko.mc.underilla.core.api.Block;
 import fr.formiko.mc.underilla.core.api.ChunkData;
+import java.util.function.Predicate;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import org.bukkit.Material;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.craftbukkit.generator.CraftChunkData;
 
 public class BukkitChunkData implements ChunkData {
 
     // FIELDS
+    private static final Predicate<BlockState> NOT_ORDINARY_AIR = state -> state != Blocks.AIR.defaultBlockState();
     private org.bukkit.generator.ChunkGenerator.ChunkData chunkData;
 
 
@@ -38,6 +44,21 @@ public class BukkitChunkData implements ChunkData {
     @Override
     public void setRegion(int xMin, int yMin, int zMin, int xMax, int yMax, int zMax, Block block) {
         if (!(block instanceof BukkitBlock bukkitBlock)) {
+            return;
+        }
+        if (bukkitBlock.getMaterial() == Material.AIR && chunkData instanceof CraftChunkData craft) {
+            var handle = craft.getHandle();
+            int top = Math.min(yMax, getMaxHeight());
+            for (int bottom = Math.max(yMin, getMinHeight()); bottom < top;) {
+                int end = Math.min(top, (bottom & ~15) + 16);
+                var section = handle.getSection(handle.getSectionIndex(bottom));
+                // hasOnlyAir also includes cave/void air. These must still be normalized
+                // to ordinary air exactly as the original setRegion implementation did.
+                if (section.getStates().maybeHas(NOT_ORDINARY_AIR)) {
+                    chunkData.setRegion(xMin, bottom, zMin, xMax, end, zMax, bukkitBlock.getBlockData());
+                }
+                bottom = end;
+            }
             return;
         }
         this.chunkData.setRegion(xMin, yMin, zMin, xMax, yMax, zMax, bukkitBlock.getBlockData());

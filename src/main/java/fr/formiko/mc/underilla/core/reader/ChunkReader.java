@@ -26,11 +26,17 @@ public abstract class ChunkReader implements Reader {
 
     // FIELDS
     private final Chunk chunk_;
-    private Integer airColumnHeight_ = null;
+    private volatile Integer airColumnHeight_ = null;
+    private final int minSection;
+    private final int maxSection;
 
 
     // CONSTRUCTORS
-    protected ChunkReader(Chunk chunk) { this.chunk_ = chunk; }
+    protected ChunkReader(Chunk chunk) {
+        this.chunk_ = chunk;
+        this.minSection = chunk.getSectionMap().keySet().stream().mapToInt(Integer::intValue).min().orElse(MINIMUM_SECTION_HEIGHT);
+        this.maxSection = chunk.getSectionMap().keySet().stream().mapToInt(Integer::intValue).max().orElse(MAXIMUM_SECTION_HEIGHT - 1);
+    }
 
 
     // GETTERS
@@ -68,7 +74,7 @@ public abstract class ChunkReader implements Reader {
 
         // If sections doesn't exist trying to pull it from the above section
         int i = height + 1;
-        while (i < MAXIMUM_SECTION_HEIGHT) {
+        while (i <= maxSection) {
             section = sectionMap.get(i);
             if (section != null) {
                 biomeTag = section.getBiomeAt(x, Math.floorMod(y, 16), z);
@@ -81,7 +87,7 @@ public abstract class ChunkReader implements Reader {
 
         // If no above section exists, trying to pull it from the under section
         i = height - 1;
-        while (i >= MINIMUM_SECTION_HEIGHT) {
+        while (i >= minSection) {
             section = sectionMap.get(i);
             if (section != null) {
                 biomeTag = section.getBiomeAt(x, Math.floorMod(y, 16), z);
@@ -113,8 +119,8 @@ public abstract class ChunkReader implements Reader {
         };
 
         Section s;
-        int lowest = MAXIMUM_HEIGHT - 1;
-        while (lowest > MINIMUM_HEIGHT - 1) {
+        int lowest = maxSection;
+        while (lowest >= minSection) {
             s = this.chunk_.getSection(lowest);
             if (s == null || isAir.test(s)) {
                 lowest--;
